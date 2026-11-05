@@ -48,6 +48,17 @@ MATCH_PARAMS = {
     'max_translation': 150.0,
     'max_initial_displacement': 150.0,
     'min_inliers': 10,
+    'min_inlier_span_ratio': 0.25,
+    'structure_blur_sigma': 4.0,
+    'structure_patch_size': 64,
+    'structure_grid_step': 64,
+    'structure_search_radius': 20,
+    'structure_min_ncc': 0.5,
+    'structure_max_error': 15.0,
+    'structure_min_scale': 0.95,
+    'structure_max_scale': 1.05,
+    'structure_max_rotation_deg': 4.0,
+    'match_line_thickness': 3,
 }
 
 
@@ -261,6 +272,57 @@ def _similarity_from_two_points(p1, p2):
     return M
 
 
+def _similarity_is_valid(H, params, structural=False):
+    if H is None:
+        return False
+    scale = np.hypot(H[0, 0], H[1, 0])
+    angle = np.degrees(np.arctan2(H[1, 0], H[0, 0]))
+    translation = np.linalg.norm(H[:2, 2])
+    if structural:
+        min_scale = params['structure_min_scale']
+        max_scale = params['structure_max_scale']
+        max_rotation = params['structure_max_rotation_deg']
+    else:
+        min_scale = params['min_scale']
+        max_scale = params['max_scale']
+        max_rotation = params['max_rotation_deg']
+    return (min_scale <= scale <= max_scale and
+            abs(angle) <= max_rotation and
+            translation <= params['max_translation'])
+
+
+def _fit_similarity_weighted(pts1, pts2, weights=None):
+    pts1 = np.asarray(pts1, dtype=np.float64)
+    pts2 = np.asarray(pts2, dtype=np.float64)
+    if len(pts1) < 2:
+        return None
+    if weights is None:
+        weights = np.ones(len(pts1), dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    total = weights.sum()
+    if total < 1e-12:
+        return None
+
+    c1 = np.average(pts1, axis=0, weights=weights)
+    c2 = np.average(pts2, axis=0, weights=weights)
+    x = pts1 - c1
+    y = pts2 - c2
+    den = np.sum(weights * np.sum(x * x, axis=1))
+    if den < 1e-12:
+        return None
+
+    a = np.sum(weights * np.sum(x * y, axis=1)) / den
+    b = np.sum(weights * (x[:, 0] * y[:, 1] - x[:, 1] * y[:, 0])) / den
+    H = np.eye(3, dtype=np.float64)
+    H[:2, :2] = [[a, -b], [b, a]]
+    H[:2, 2] = c2 - H[:2, :2] @ c1
+    return H
+
+
+def _fit_similarity(pts1, pts2):
+    return _fit_similarity_weighted(pts1, pts2)
+
+
 def fsc_outlier_removal(pts1, pts2, params):
     n = len(pts1)
     if n < 4:
@@ -272,22 +334,13 @@ def fsc_outlier_removal(pts1, pts2, params):
         return np.array([], dtype=int), None
 
     best_inliers = np.array([], dtype=int)
+    best_H = None
     rng = np.random.default_rng(19)
 
     for _ in range(params['fsc_max_iters']):
         idx = rng.choice(candidates, 2, replace=False)
         M = _similarity_from_two_points(pts1[idx], pts2[idx])
-        if M is None:
-            continue
-
-        scale = np.hypot(M[0, 0], M[1, 0])
-        angle = np.degrees(np.arctan2(M[1, 0], M[0, 0]))
-        translation = np.linalg.norm(M[:2, 2])
-        if not (params['min_scale'] < scale < params['max_scale']):
-            continue
-        if abs(angle) > params['max_rotation_deg']:
-            continue
-        if translation > params['max_translation']:
+        if M is None or not _similarity_is_valid(M, params):
             continue
 
         proj = pts1 @ M[:2, :2].T + M[:2, 2]
@@ -295,35 +348,65 @@ def fsc_outlier_removal(pts1, pts2, params):
         inliers = np.where(err < params['fsc_thresh'])[0]
         if len(inliers) > len(best_inliers):
             best_inliers = inliers
+            best_H = M
 
     if len(best_inliers) < 4:
         return np.array([], dtype=int), None
 
-    H = None
+    H = best_H
     for _ in range(5):
-        H, _ = cv2.estimateAffinePartial2D(
-            pts1[best_inliers], pts2[best_inliers], method=cv2.LMEDS
-        )
-        if H is None:
-            return np.array([], dtype=int), None
-        proj = pts1 @ H[:, :2].T + H[:, 2]
+        candidate_H = _fit_similarity(pts1[best_inliers], pts2[best_inliers])
+        if candidate_H is None or not _similarity_is_valid(candidate_H, params):
+            break
+        H = candidate_H
+        proj = pts1 @ H[:2, :2].T + H[:2, 2]
         err = np.linalg.norm(pts2 - proj, axis=1)
         new_inliers = np.where(err < params['fsc_thresh'])[0]
         if len(new_inliers) < 4:
-            return np.array([], dtype=int), None
+            break
         if np.array_equal(new_inliers, best_inliers):
             break
         best_inliers = new_inliers
 
-    H, _ = cv2.estimateAffinePartial2D(
-        pts1[best_inliers], pts2[best_inliers], method=cv2.LMEDS
-    )
-    if H is None:
-        return np.array([], dtype=int), None
+    return best_inliers, H
 
-    M = np.eye(3, dtype=np.float64)
-    M[:2] = H
-    return best_inliers, M
+
+def _registration_is_reliable(H, pairs, image_shape, params):
+    if H is None or len(pairs) < params['min_inliers']:
+        return False
+    if not _similarity_is_valid(H, params):
+        return False
+
+    pts = np.float32([pair["pt_optical_px"] for pair in pairs])
+    span = np.ptp(pts, axis=0)
+    height, width = image_shape
+    min_span = params['min_inlier_span_ratio'] * np.array([width, height])
+    return bool(np.all(span >= min_span))
+
+
+def _draw_matches(img1, kp1, img2, kp2, matches, thickness=3):
+    border = 10
+    height = max(img1.shape[0], img2.shape[0])
+    width = img1.shape[1] + border + img2.shape[1]
+    canvas = np.full((height, width, 3), 32, dtype=np.uint8)
+    canvas[:img1.shape[0], :img1.shape[1]] = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
+    canvas[:img2.shape[0], img1.shape[1] + border:] = cv2.cvtColor(
+        img2, cv2.COLOR_GRAY2BGR
+    )
+
+    rng = np.random.default_rng(7)
+    for match in matches:
+        color = tuple(int(c) for c in rng.integers(40, 256, 3))
+        p1 = tuple(np.round(kp1[match.queryIdx].pt).astype(int))
+        p2 = tuple(np.round(np.array(kp2[match.trainIdx].pt) +
+                            np.array([img1.shape[1] + border, 0])).astype(int))
+        cv2.line(canvas, p1, p2, color, thickness=thickness,
+                 lineType=cv2.LINE_AA)
+        point_radius = max(2, thickness)
+        cv2.circle(canvas, p1, point_radius, color, -1, cv2.LINE_AA)
+        cv2.circle(canvas, p2, point_radius, color, -1, cv2.LINE_AA)
+
+    return canvas
 
 
 # =========================================================================
@@ -360,9 +443,9 @@ def match_and_fsc(kp1, des1, kp2, des2, img1, img2, params):
 
     img1_u8 = (np.clip(img1, 0, 1) * 255).astype(np.uint8)
     img2_u8 = (np.clip(img2, 0, 1) * 255).astype(np.uint8)
-    initial_img = cv2.drawMatches(
-        img1_u8, kp1, img2_u8, kp2, unique, None,
-        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+    initial_img = _draw_matches(
+        img1_u8, kp1, img2_u8, kp2, unique,
+        params['match_line_thickness']
     )
 
     pts1 = np.float32([kp1[m.queryIdx].pt for m in unique])
@@ -393,19 +476,240 @@ def match_and_fsc(kp1, des1, kp2, des2, img1, img2, params):
             "pt_optical_px": [float(x1), float(y1)],
             "pt_sar_px": [float(x2), float(y2)],
             "descriptor_distance": float(m.distance),
-            "reprojection_error_px": float(error)
+            "reprojection_error_px": float(error),
+            "matching_method": "rift2_fsc"
         })
 
-    final_img = cv2.drawMatches(
-        img1_u8, kp1, img2_u8, kp2, inlier_matches, None,
-        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+    final_img = _draw_matches(
+        img1_u8, kp1, img2_u8, kp2, inlier_matches,
+        params['match_line_thickness']
     )
 
     return H, inlier_matches, final_img, initial_img, pairs
 
 
 # =========================================================================
-# 7. 运行入口
+# 7. 弱结构场景：亮目标结构回退
+# =========================================================================
+def _bright_structure_map(image, percentile, sigma):
+    response = np.maximum(image - np.percentile(image, percentile), 0.0)
+    return cv2.GaussianBlur(response.astype(np.float32), (0, 0), float(sigma))
+
+
+def _estimate_coarse_similarity(img1, img2, params):
+    pad = int(params['max_translation'])
+    border = 48
+    sigma = params['structure_blur_sigma']
+    a = _bright_structure_map(img1, 65, sigma)
+    b = _bright_structure_map(img2, 65, sigma)
+    padded = cv2.copyMakeBorder(
+        b, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0
+    )
+
+    best_score = -np.inf
+    best_H = None
+    scales = np.arange(params['min_scale'], params['max_scale'] + 0.001, 0.01)
+    angles = np.arange(-params['max_rotation_deg'],
+                       params['max_rotation_deg'] + 0.001, 0.5)
+
+    for scale in scales:
+        for angle_deg in angles:
+            angle = np.deg2rad(angle_deg)
+            A = np.array([
+                [scale * np.cos(angle), -scale * np.sin(angle), 0.0],
+                [scale * np.sin(angle), scale * np.cos(angle), 0.0]
+            ], dtype=np.float32)
+            warped = cv2.warpAffine(a, A, (a.shape[1], a.shape[0]))
+            template = warped[border:-border, border:-border]
+            result = cv2.matchTemplate(padded, template, cv2.TM_CCOEFF_NORMED)
+
+            yy, xx = np.indices(result.shape)
+            offset = A[:, :2] @ np.array([border, border], dtype=np.float32)
+            tx = xx - pad - offset[0]
+            ty = yy - pad - offset[1]
+            result[(np.abs(tx) > pad) | (np.abs(ty) > pad)] = -np.inf
+
+            score = float(result.max())
+            if not np.isfinite(score) or score <= best_score:
+                continue
+
+            y, x = np.unravel_index(np.argmax(result), result.shape)
+            t = np.array([x - pad, y - pad], dtype=np.float64) - offset
+            H = np.eye(3, dtype=np.float64)
+            H[:2, :2] = A[:, :2]
+            H[:2, 2] = t
+            best_score = score
+            best_H = H
+
+    return best_score, best_H
+
+
+def _structural_block_matches(img1, img2, H, params, percentile):
+    sigma = params['structure_blur_sigma']
+    a = _bright_structure_map(img1, percentile, sigma)
+    b = _bright_structure_map(img2, percentile, sigma)
+    half = params['structure_patch_size'] // 2
+    search = params['structure_search_radius']
+    step = params['structure_grid_step']
+    border = params['border_margin']
+    matches = []
+
+    for y in range(border, img1.shape[0] - border, step):
+        for x in range(border, img1.shape[1] - border, step):
+            template = a[y - half:y + half, x - half:x + half]
+            if np.std(template) < 1e-6:
+                continue
+
+            pred = np.array([x, y], dtype=np.float64) @ H[:2, :2].T + H[:2, 2]
+            cx, cy = np.round(pred).astype(int)
+            x0 = cx - half - search
+            y0 = cy - half - search
+            x1 = cx + half + search
+            y1 = cy + half + search
+            if x0 < 0 or y0 < 0 or x1 > b.shape[1] or y1 > b.shape[0]:
+                continue
+
+            window = b[y0:y1, x0:x1]
+            result = cv2.matchTemplate(window, template, cv2.TM_CCOEFF_NORMED)
+            if result.size == 0:
+                continue
+
+            _, score, _, loc = cv2.minMaxLoc(result)
+            qx = x0 + loc[0] + half
+            qy = y0 + loc[1] + half
+            matches.append((x, y, qx, qy, float(score)))
+
+    if not matches:
+        return None, None, None
+    matches = np.asarray(matches, dtype=np.float32)
+    return matches[:, :2], matches[:, 2:4], matches[:, 4]
+
+
+def _refine_structural_similarity(pts1, pts2, scores, H, params):
+    current_H = H.copy()
+    for _ in range(10):
+        proj = pts1 @ current_H[:2, :2].T + current_H[:2, 2]
+        errors = np.linalg.norm(pts2 - proj, axis=1)
+        idx = ((scores >= params['structure_min_ncc']) &
+               (errors < params['structure_max_error']))
+        if np.count_nonzero(idx) < params['min_inliers']:
+            break
+
+        candidate_H = _fit_similarity_weighted(
+            pts1[idx], pts2[idx], scores[idx]
+        )
+        if candidate_H is None or not _similarity_is_valid(
+                candidate_H, params, structural=True):
+            break
+
+        change = np.linalg.norm(candidate_H[:2] - current_H[:2])
+        current_H = candidate_H
+        if change < 1e-5:
+            break
+
+    proj = pts1 @ current_H[:2, :2].T + current_H[:2, 2]
+    errors = np.linalg.norm(pts2 - proj, axis=1)
+    idx = ((scores >= params['structure_min_ncc']) &
+           (errors < params['structure_max_error']))
+    return current_H, idx, errors
+
+
+def _transform_discrepancy(H1, H2, image_shape):
+    height, width = image_shape
+    pts = np.float32([
+        [0, 0], [width - 1, 0], [0, height - 1],
+        [width - 1, height - 1], [width / 2, height / 2]
+    ])
+    p1 = pts @ H1[:2, :2].T + H1[:2, 2]
+    p2 = pts @ H2[:2, :2].T + H2[:2, 2]
+    return float(np.mean(np.linalg.norm(p1 - p2, axis=1)))
+
+
+def structural_registration(img_opt, img_sar, params):
+    print("[回退] 估计亮结构粗变换 ...")
+    coarse_score, coarse_H = _estimate_coarse_similarity(
+        img_opt, img_sar, params
+    )
+    if coarse_H is None or coarse_score < 0.25:
+        print(f"[回退] 粗变换相关性不足: {coarse_score:.4f}")
+        return None
+
+    scale = np.hypot(coarse_H[0, 0], coarse_H[1, 0])
+    angle = np.degrees(np.arctan2(coarse_H[1, 0], coarse_H[0, 0]))
+    print(f"[回退] 粗变换: NCC={coarse_score:.4f}, "
+          f"scale={scale:.6f}, angle={angle:.4f}")
+
+    results = {}
+    for percentile in (55, 65, 75):
+        pts1, pts2, scores = _structural_block_matches(
+            img_opt, img_sar, coarse_H, params, percentile
+        )
+        if pts1 is None:
+            print(f"[回退] 阈值 {percentile} 无有效块")
+            return None
+
+        H, idx, errors = _refine_structural_similarity(
+            pts1, pts2, scores, coarse_H, params
+        )
+        count = int(np.count_nonzero(idx))
+        span = np.ptp(pts1[idx], axis=0) if count else np.array([0, 0])
+        height, width = img_opt.shape
+        min_span = params['min_inlier_span_ratio'] * np.array([width, height])
+        if count < params['min_inliers'] or not np.all(span >= min_span):
+            print(f"[回退] 阈值 {percentile} 分布不足: n={count}, span={span}")
+            return None
+
+        results[percentile] = (H, pts1, pts2, scores, idx, errors)
+        print(f"[回退] 阈值 {percentile}: n={count}, "
+              f"scale={np.hypot(H[0, 0], H[1, 0]):.6f}, "
+              f"angle={np.degrees(np.arctan2(H[1, 0], H[0, 0])):.4f}, "
+              f"median_error={np.median(errors[idx]):.3f}")
+
+    reference_H = results[65][0]
+    discrepancies = {
+        percentile: _transform_discrepancy(
+            reference_H, results[percentile][0], img_opt.shape
+        )
+        for percentile in (55, 75)
+    }
+    if max(discrepancies.values()) > 10.0:
+        print(f"[回退] 多阈值变换不一致: {discrepancies}")
+        return None
+    print(f"[回退] 多阈值一致性: {discrepancies}")
+
+    H, pts1, pts2, scores, idx, errors = results[65]
+    kp1 = [cv2.KeyPoint(float(x), float(y), 1.0) for x, y in pts1[idx]]
+    kp2 = [cv2.KeyPoint(float(x), float(y), 1.0) for x, y in pts2[idx]]
+    matches = [
+        cv2.DMatch(i, i, 1.0 - float(score))
+        for i, score in enumerate(scores[idx])
+    ]
+
+    img1_u8 = (np.clip(img_opt, 0, 1) * 255).astype(np.uint8)
+    img2_u8 = (np.clip(img_sar, 0, 1) * 255).astype(np.uint8)
+    final_img = _draw_matches(
+        img1_u8, kp1, img2_u8, kp2, matches,
+        params['match_line_thickness']
+    )
+
+    pairs = []
+    for (x1, y1), (x2, y2), score, error in zip(
+            pts1[idx], pts2[idx], scores[idx], errors[idx]):
+        pairs.append({
+            "pt_optical_px": [float(x1), float(y1)],
+            "pt_sar_px": [float(x2), float(y2)],
+            "descriptor_distance": None,
+            "structure_ncc": float(score),
+            "reprojection_error_px": float(error),
+            "matching_method": "bright_structure_ncc"
+        })
+
+    print(f"[回退] 有效结构匹配: {len(pairs)} 对")
+    return H, final_img, pairs
+
+
+# =========================================================================
+# 8. 运行入口
 # =========================================================================
 def load_gray(path):
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
@@ -439,6 +743,15 @@ def run_rift2(opt_path, sar_path, out_dir):
     H, inliers, final_img, initial_img, pairs = match_and_fsc(
         kp_opt_v, des_opt, kp_sar_v, des_sar, img_opt, img_sar, MATCH_PARAMS
     )
+
+    if not _registration_is_reliable(H, pairs, img_opt.shape, MATCH_PARAMS):
+        if H is not None:
+            print("[验证] RIFT2 结果未通过全图可靠性检查，启用亮结构回退")
+        else:
+            print("[验证] RIFT2 未得到可靠结果，启用亮结构回退")
+        fallback = structural_registration(img_opt, img_sar, MATCH_PARAMS)
+        if fallback is not None:
+            H, final_img, pairs = fallback
 
     if initial_img is not None:
         cv2.imwrite(os.path.join(out_dir, "match_rift2_initial.png"), initial_img)
