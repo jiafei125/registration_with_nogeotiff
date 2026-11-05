@@ -4,7 +4,7 @@
 
 ## 📂 项目目录结构
 
-```text
+```
 registration_with_newdata/
 │
 ├── data/                          # 原始数据存放目录 (tif, jpg)
@@ -25,6 +25,7 @@ registration_with_newdata/
 ├── PreProcess_opt.py              # 步骤2a：光学图像预处理
 ├── PreProcess_sar.py              # 步骤2b：SAR图像预处理
 └── matching.py                    # 步骤3：核心配准算法 (RIFT2)
+```
 
 ## ⚙️ 环境依赖
 
