@@ -59,6 +59,7 @@ MATCH_PARAMS = {
     'structure_max_scale': 1.05,
     'structure_max_rotation_deg': 4.0,
     'match_line_thickness': 3,
+    'match_point_radius': 6,
 }
 
 
@@ -384,7 +385,7 @@ def _registration_is_reliable(H, pairs, image_shape, params):
     return bool(np.all(span >= min_span))
 
 
-def _draw_matches(img1, kp1, img2, kp2, matches, thickness=3):
+def _draw_matches(img1, kp1, img2, kp2, matches, thickness=3, point_radius=6):
     border = 10
     height = max(img1.shape[0], img2.shape[0])
     width = img1.shape[1] + border + img2.shape[1]
@@ -402,7 +403,7 @@ def _draw_matches(img1, kp1, img2, kp2, matches, thickness=3):
                             np.array([img1.shape[1] + border, 0])).astype(int))
         cv2.line(canvas, p1, p2, color, thickness=thickness,
                  lineType=cv2.LINE_AA)
-        point_radius = max(2, thickness)
+        point_radius = max(2, int(point_radius))
         cv2.circle(canvas, p1, point_radius, color, -1, cv2.LINE_AA)
         cv2.circle(canvas, p2, point_radius, color, -1, cv2.LINE_AA)
 
@@ -445,7 +446,8 @@ def match_and_fsc(kp1, des1, kp2, des2, img1, img2, params):
     img2_u8 = (np.clip(img2, 0, 1) * 255).astype(np.uint8)
     initial_img = _draw_matches(
         img1_u8, kp1, img2_u8, kp2, unique,
-        params['match_line_thickness']
+        params['match_line_thickness'],
+        params['match_point_radius']
     )
 
     pts1 = np.float32([kp1[m.queryIdx].pt for m in unique])
@@ -482,7 +484,8 @@ def match_and_fsc(kp1, des1, kp2, des2, img1, img2, params):
 
     final_img = _draw_matches(
         img1_u8, kp1, img2_u8, kp2, inlier_matches,
-        params['match_line_thickness']
+        params['match_line_thickness'],
+        params['match_point_radius']
     )
 
     return H, inlier_matches, final_img, initial_img, pairs
@@ -689,7 +692,8 @@ def structural_registration(img_opt, img_sar, params):
     img2_u8 = (np.clip(img_sar, 0, 1) * 255).astype(np.uint8)
     final_img = _draw_matches(
         img1_u8, kp1, img2_u8, kp2, matches,
-        params['match_line_thickness']
+        params['match_line_thickness'],
+        params['match_point_radius']
     )
 
     pairs = []
