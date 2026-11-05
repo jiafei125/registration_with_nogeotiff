@@ -33,7 +33,7 @@ def preprocess_optical(img_path, out_path, p_low=1, p_high=99):
 
 
 if __name__ == "__main__":
-    OPT_INPUT = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\opt_crop.png"
-    OPT_OUTPUT = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\opt_pre.png"
+    OPT_INPUT = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\opt_crop.png"
+    OPT_OUTPUT = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\opt_pre.png"
 
     preprocess_optical(OPT_INPUT, OPT_OUTPUT)

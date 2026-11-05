@@ -461,7 +461,7 @@ def run_rift2(opt_path, sar_path, out_dir):
 
 
 if __name__ == "__main__":
-    OPT_PRE = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\opt_pre.png"
-    SAR_PRE = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\sar_pre.png"
-    OUT_DIR = r"D:\Project_Pycharm\Study\registration_with_newdata\output"
+    OPT_PRE = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\opt_pre.png"
+    SAR_PRE = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\sar_pre.png"
+    OUT_DIR = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output"
     run_rift2(OPT_PRE, SAR_PRE, OUT_DIR)

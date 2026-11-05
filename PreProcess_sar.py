@@ -36,7 +36,7 @@ def preprocess_sar(img_path, out_path, bilateral_d=9,
 
 
 if __name__ == "__main__":
-    SAR_INPUT = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\sar_crop.png"
-    SAR_OUTPUT = r"D:\Project_Pycharm\Study\registration_with_newdata\output_pre\sar_pre.png"
+    SAR_INPUT = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\sar_crop.png"
+    SAR_OUTPUT = r"D:\Project_Pycharm\Study\registration_with_nogeotiff\output_pre\sar_pre.png"
 
     preprocess_sar(SAR_INPUT, SAR_OUTPUT)
