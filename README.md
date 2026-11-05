@@ -4,6 +4,7 @@
 
 ## 📂 项目目录结构
 
+```text
 registration_with_newdata/
 │
 ├── data/                          # 原始数据存放目录 (tif, jpg)
